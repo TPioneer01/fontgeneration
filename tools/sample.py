@@ -3,7 +3,6 @@ import os
 
 import numpy as np
 import torch as th
-import torch.distributed as dist
 
 from utils import dist_util, logger
 from utils.script_util import (
@@ -94,7 +93,11 @@ def main():
         ch_idx += cfg.batch_size
 
         model_kwargs["y"] = classes
-        img = th.tensor(img_pre_pros(sty_img_path, cfg.image_size), requires_grad=False).cuda().repeat(cfg.batch_size, 1, 1, 1)
+        img = (
+            th.tensor(img_pre_pros(sty_img_path, cfg.image_size), requires_grad=False)
+            .to(dist_util.dev())
+            .repeat(cfg.batch_size, 1, 1, 1)
+        )
         sty_feat = model.sty_encoder(img)
         model_kwargs["sty"] = sty_feat
         if cfg.stroke_path is not None:
@@ -168,28 +171,19 @@ def main():
         sample = sample.permute(0, 2, 3, 1)
         sample = sample.contiguous()
 
-        gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
-        dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
-        all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
-
-        gathered_labels = [
-            th.zeros_like(classes) for _ in range(dist.get_world_size())
-        ]
-        dist.all_gather(gathered_labels, classes)
-        all_labels.extend([labels.cpu().numpy() for labels in gathered_labels])
+        all_images.append(sample.cpu().numpy())
+        all_labels.append(classes.cpu().numpy())
         logger.log(f"created {len(all_images) * cfg.batch_size} samples")
 
     arr = np.concatenate(all_images, axis=0)
     arr = arr[: cfg.num_samples]
     label_arr = np.concatenate(all_labels, axis=0)
     label_arr = label_arr[: cfg.num_samples]
-    if dist.get_rank() == 0:
-        for idx, (img_sample, img_cls) in enumerate(zip(arr, label_arr)):
-            img = Image.fromarray(img_sample).convert("RGB")
-            img_name = "%05d.png" % (idx)
-            img.save(os.path.join(img_save_path, img_name))
+    for idx, (img_sample, img_cls) in enumerate(zip(arr, label_arr)):
+        img = Image.fromarray(img_sample).convert("RGB")
+        img_name = "%05d.png" % (idx)
+        img.save(os.path.join(img_save_path, img_name))
 
-    dist.barrier()
     logger.log("sampling complete")
 
 
